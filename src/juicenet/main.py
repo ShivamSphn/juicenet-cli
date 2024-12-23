@@ -30,6 +30,7 @@ from .utils import (
     map_file_to_pars,
     move_files,
 )
+from .parallel import process_files_parallel, parallel_parpar, parallel_nyuu
 from .version import get_version
 
 # Supress keyboardinterrupt traceback because I hate it
@@ -254,30 +255,31 @@ def main(
             total = len(files)
             task_parpar = progress.add_task("ParPar...", total=total)
 
+            # Filter out already uploaded files
+            files_to_process = []
             for file in files:
-                related_files = get_related_files(file, exts=related_exts)
-
-                if related_files:
-                    logger.info(f"Found {len(related_files)} related files")
-                    logger.debug(pformat(related_files))
-                else:
-                    logger.info(f"No related files found for {file.name}")
-
                 if resume.already_uploaded(file):
                     logger.info(f"Skipping: {file.name} - Already uploaded")
                     progress.update(task_parpar, advance=1)
                 else:
-                    parpar_out = parpar.generate_par2_files(file, related_files=related_files)
+                    files_to_process.append(file)
 
-                    if parpar_out.success:
-                        logger.success(file.name)
-                        # Only log to resume if process was successful
+            if files_to_process:
+                # Process remaining files in parallel
+                parpar_outputs = parallel_parpar(
+                    files=files_to_process,
+                    parpar=parpar,
+                    related_exts=related_exts,
+                    progress=progress,
+                    task_id=task_parpar,
+                    max_workers=None  # Let ThreadPoolExecutor decide based on CPU count
+                )
+
+                # Log successful operations to resume and prepare output
+                for file, result in parpar_outputs.items():
+                    if result.success:
                         resume.log_file_info(file)
-                    else:
-                        logger.error(file.name)
-
-                    progress.update(task_parpar, advance=1)
-                    output[file] = SubprocessOutput(parpar=parpar_out)
+                    output[file] = SubprocessOutput(parpar=result)
 
         return InternalJuicenetOutput(files=output)
 
@@ -295,30 +297,32 @@ def main(
             total = len(files)
             task_nyuu = progress.add_task("Nyuu...", total=total)
 
+            # Filter out already uploaded files
+            files_to_process = []
             for file in files:
-                related_files = get_related_files(file, exts=related_exts)
-
-                if related_files:
-                    logger.info(f"Found {len(related_files)} related files")
-                    logger.debug(pformat(related_files))
-                else:
-                    logger.info(f"No related files found for {file.name}")
-
                 if resume.already_uploaded(file):
                     logger.info(f"Skipping: {file.name} - Already uploaded")
                     progress.update(task_nyuu, advance=1)
                 else:
-                    nyuu_out = nyuu.upload(file=file, related_files=related_files, par2files=par2files[file])
+                    files_to_process.append(file)
 
-                    if nyuu_out.success:
-                        logger.success(file.name)
-                        # Only log to resume if process was successful
+            if files_to_process:
+                # Process remaining files in parallel
+                nyuu_outputs = parallel_nyuu(
+                    files=files_to_process,
+                    nyuu=nyuu,
+                    parpar_outputs={},  # Empty since we're using existing par2 files
+                    related_exts=related_exts,
+                    progress=progress,
+                    task_id=task_nyuu,
+                    max_workers=None  # Let ThreadPoolExecutor decide based on CPU count
+                )
+
+                # Log successful uploads to resume and prepare output
+                for file, result in nyuu_outputs.items():
+                    if result.success:
                         resume.log_file_info(file)
-                    else:
-                        logger.error(file.name)
-
-                    progress.update(task_nyuu, advance=1)
-                    output[file] = SubprocessOutput(nyuu=nyuu_out)
+                    output[file] = SubprocessOutput(nyuu=result)
 
         return InternalJuicenetOutput(files=output)
 
@@ -328,37 +332,36 @@ def main(
 
         with progress_bar(console=console, disable=debug) as progress:
             total = len(files)
-
             task_parpar = progress.add_task("ParPar...", total=total)
             task_nyuu = progress.add_task("Nyuu...", total=total)
 
+            # Filter out already uploaded files
+            files_to_process = []
             for file in files:
-                related_files = get_related_files(file, exts=related_exts)
-
-                if related_files:
-                    logger.info(f"Found {len(related_files)} related files")
-                    logger.debug(pformat(related_files))
-                else:
-                    logger.info(f"No related files found for {file.name}")
-
                 if resume.already_uploaded(file):
                     logger.info(f"Skipping: {file.name} - Already uploaded")
                     progress.update(task_parpar, advance=1)
                     progress.update(task_nyuu, advance=1)
                 else:
-                    parpar_out = parpar.generate_par2_files(file, related_files=related_files)
-                    progress.update(task_parpar, advance=1)
-                    nyuu_out = nyuu.upload(file=file, related_files=related_files, par2files=parpar_out.par2files)
+                    files_to_process.append(file)
 
-                    if nyuu_out.success:
-                        logger.success(file.name)
-                        # Only log to resume if process was successful
+            if files_to_process:
+                # Process remaining files in parallel
+                output = process_files_parallel(
+                    files=files_to_process,
+                    parpar=parpar,
+                    nyuu=nyuu,
+                    related_exts=related_exts,
+                    progress=progress,
+                    parpar_task_id=task_parpar,
+                    nyuu_task_id=task_nyuu,
+                    max_workers=None  # Let ThreadPoolExecutor decide based on CPU count
+                )
+
+                # Log successful uploads to resume
+                for file, result in output.items():
+                    if result.nyuu and result.nyuu.success:
                         resume.log_file_info(file)
-                    else:
-                        logger.error(file.name)
-
-                    progress.update(task_nyuu, advance=1)
-                    output[file] = SubprocessOutput(nyuu=nyuu_out, parpar=parpar_out)
 
         return InternalJuicenetOutput(files=output)
 
@@ -386,38 +389,38 @@ def main(
         else:
             rawoutput = None
 
+        # Process files in parallel
         with progress_bar(console=console, disable=debug) as progress:
             total = len(files)
-
             task_parpar = progress.add_task("ParPar...", total=total)
             task_nyuu = progress.add_task("Nyuu...", total=total)
 
+            # Filter out already uploaded files
+            files_to_process = []
             for file in files:
-                related_files = get_related_files(file, exts=related_exts)
-
-                if related_files:
-                    logger.info(f"Found {len(related_files)} related files")
-                    logger.debug(pformat(related_files))
-                else:
-                    logger.info(f"No related files found for {file.name}")
-
                 if resume.already_uploaded(file):
                     logger.info(f"Skipping: {file.name} - Already uploaded")
                     progress.update(task_parpar, advance=1)
                     progress.update(task_nyuu, advance=1)
                 else:
-                    parpar_out = parpar.generate_par2_files(file, related_files=related_files)
-                    progress.update(task_parpar, advance=1)
-                    nyuu_out = nyuu.upload(file=file, related_files=related_files, par2files=parpar_out.par2files)
+                    files_to_process.append(file)
 
-                    if nyuu_out.success:
-                        logger.success(file.name)
-                        # Only log to resume if process was successful
+            if files_to_process:
+                # Process remaining files in parallel
+                output = process_files_parallel(
+                    files=files_to_process,
+                    parpar=parpar,
+                    nyuu=nyuu,
+                    related_exts=related_exts,
+                    progress=progress,
+                    parpar_task_id=task_parpar,
+                    nyuu_task_id=task_nyuu,
+                    max_workers=None  # Let ThreadPoolExecutor decide based on CPU count
+                )
+
+                # Log successful uploads to resume
+                for file, result in output.items():
+                    if result.nyuu and result.nyuu.success:
                         resume.log_file_info(file)
-                    else:
-                        logger.error(file.name)
-
-                    progress.update(task_nyuu, advance=1)
-                    output[file] = SubprocessOutput(nyuu=nyuu_out, parpar=parpar_out)
 
         return InternalJuicenetOutput(files=output, articles=rawoutput)
